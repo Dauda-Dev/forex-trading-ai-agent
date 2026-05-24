@@ -8,14 +8,10 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import { EventEmitter } from 'events';
-import makeWASocket, { 
-  DisconnectReason, 
-  useMultiFileAuthState,
-  WASocket,
-  proto,
-  makeCacheableSignalKeyStore
-} from '@whiskeysockets/baileys';
-import { Boom } from '@hapi/boom';
+
+// Baileys is ESM-only — loaded lazily via dynamic import to avoid CJS/ESM conflict
+type WASocket = any;
+type DisconnectReasonType = any;
 
 const KIT_HOME = path.join(os.homedir(), '.kit');
 const CONFIG_PATH = path.join(KIT_HOME, 'config.json');
@@ -64,6 +60,12 @@ export class WhatsAppChannel extends EventEmitter {
       fs.mkdirSync(WHATSAPP_AUTH_DIR, { recursive: true });
     }
 
+    // Dynamic import — baileys is ESM-only
+    const baileys = await import('@whiskeysockets/baileys');
+    const makeWASocket = baileys.default;
+    const { DisconnectReason, useMultiFileAuthState, makeCacheableSignalKeyStore } = baileys;
+    const { Boom } = await import('@hapi/boom');
+
     // Load auth state
     const { state, saveCreds } = await useMultiFileAuthState(WHATSAPP_AUTH_DIR);
 
@@ -91,7 +93,7 @@ export class WhatsAppChannel extends EventEmitter {
     });
 
     // Handle connection events
-    this.socket.ev.on('connection.update', async (update) => {
+    this.socket.ev.on('connection.update', async (update: any) => {
       const { connection, lastDisconnect, qr } = update;
 
       if (qr) {
@@ -104,7 +106,7 @@ export class WhatsAppChannel extends EventEmitter {
       }
 
       if (connection === 'close') {
-        const reason = (lastDisconnect?.error as Boom)?.output?.statusCode;
+        const reason = (lastDisconnect?.error as any)?.output?.statusCode;
         const shouldReconnect = reason !== DisconnectReason.loggedOut;
         
         console.log(`[WhatsApp] Connection closed: ${reason}`);
@@ -133,7 +135,7 @@ export class WhatsAppChannel extends EventEmitter {
     this.socket.ev.on('creds.update', saveCreds);
 
     // Handle incoming messages
-    this.socket.ev.on('messages.upsert', async (m) => {
+    this.socket.ev.on('messages.upsert', async (m: any) => {
       for (const msg of m.messages) {
         // Skip status broadcasts and own messages
         if (msg.key.remoteJid === 'status@broadcast') continue;

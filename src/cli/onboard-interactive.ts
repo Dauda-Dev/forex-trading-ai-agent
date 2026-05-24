@@ -3,11 +3,9 @@
  * Beautiful terminal UI with multi-select, checkboxes, and smooth UX
  */
 
-import * as p from '@clack/prompts';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
-import color from 'picocolors';
 
 const KIT_HOME = path.join(os.homedir(), '.kit');
 const CONFIG_PATH = path.join(KIT_HOME, 'config.json');
@@ -45,6 +43,10 @@ interface OnboardingData {
 // ============================================================================
 
 export async function runInteractiveOnboarding(): Promise<void> {
+  // Dynamic imports for ESM-only packages
+  const p = await import('@clack/prompts');
+  const color = (await import('picocolors')).default;
+
   console.clear();
   
   p.intro(color.bgCyan(color.black(' K.I.T. - Knight Industries Trading ')));
@@ -75,7 +77,7 @@ ${color.cyan('╚═════════════════════
       return undefined;
     },
   });
-  if (p.isCancel(userName)) return handleCancel();
+  if (p.isCancel(userName)) return handleCancel(p);
   data.userName = userName as string;
 
   // Step 2: Goals (Multi-select)
@@ -91,7 +93,7 @@ ${color.cyan('╚═════════════════════
     required: true,
     initialValues: ['wealth'],
   });
-  if (p.isCancel(goals)) return handleCancel();
+  if (p.isCancel(goals)) return handleCancel(p);
   data.goals = goals as string[];
 
   // Step 3: Experience
@@ -104,7 +106,7 @@ ${color.cyan('╚═════════════════════
       { value: 'professional', label: '👔 Professional', hint: 'Full-time trader' },
     ],
   });
-  if (p.isCancel(experience)) return handleCancel();
+  if (p.isCancel(experience)) return handleCancel(p);
   data.experience = experience as string;
 
   // Step 4: Risk Tolerance
@@ -117,7 +119,7 @@ ${color.cyan('╚═════════════════════
       { value: 'very-aggressive', label: '💥 Very Aggressive', hint: 'Up to 20% per trade' },
     ],
   });
-  if (p.isCancel(risk)) return handleCancel();
+  if (p.isCancel(risk)) return handleCancel(p);
   data.riskTolerance = risk as string;
   data.maxPositionSize = { 'conservative': '2', 'moderate': '5', 'aggressive': '10', 'very-aggressive': '20' }[risk as string] || '5';
 
@@ -135,7 +137,7 @@ ${color.cyan('╚═════════════════════
     required: true,
     initialValues: ['crypto', 'forex'],
   });
-  if (p.isCancel(markets)) return handleCancel();
+  if (p.isCancel(markets)) return handleCancel(p);
   data.markets = markets as string[];
 
   // Step 6: Tools/Skills Selection (Multi-select)
@@ -198,7 +200,7 @@ ${color.cyan('╚═════════════════════
     required: true,
     initialValues: ['auto_trader', 'portfolio_tracker', 'market_analysis', 'alerts'],
   });
-  if (p.isCancel(enabledTools)) return handleCancel();
+  if (p.isCancel(enabledTools)) return handleCancel(p);
   data.enabledTools = enabledTools as string[];
 
   // Step 7: Autonomy Level (was Step 6)
@@ -210,7 +212,7 @@ ${color.cyan('╚═════════════════════
       { value: 'full-auto', label: '🤖 Full-Auto', hint: 'Everything within limits' },
     ],
   });
-  if (p.isCancel(autonomy)) return handleCancel();
+  if (p.isCancel(autonomy)) return handleCancel(p);
   data.autonomyLevel = autonomy as string;
 
   // Step 7: Timezone
@@ -226,7 +228,7 @@ ${color.cyan('╚═════════════════════
     ],
     initialValue: 'Europe/Berlin',
   });
-  if (p.isCancel(timezone)) return handleCancel();
+  if (p.isCancel(timezone)) return handleCancel(p);
   data.timezone = timezone as string;
 
   // Step 8: AI Provider
@@ -242,7 +244,7 @@ ${color.cyan('╚═════════════════════
     ],
     initialValue: 'openai',
   });
-  if (p.isCancel(aiProvider)) return handleCancel();
+  if (p.isCancel(aiProvider)) return handleCancel(p);
   data.aiProvider = aiProvider as string;
 
   // Step 9: AI Model (based on provider)
@@ -251,7 +253,7 @@ ${color.cyan('╚═════════════════════
     message: `Select ${aiProvider} model:`,
     options: modelOptions,
   });
-  if (p.isCancel(aiModel)) return handleCancel();
+  if (p.isCancel(aiModel)) return handleCancel(p);
   data.aiModel = aiModel as string;
 
   // Step 10: API Key
@@ -263,7 +265,7 @@ ${color.cyan('╚═════════════════════
         return undefined;
       },
     });
-    if (p.isCancel(apiKey)) return handleCancel();
+    if (p.isCancel(apiKey)) return handleCancel(p);
     data.aiApiKey = apiKey as string;
   }
 
@@ -279,7 +281,7 @@ ${color.cyan('╚═════════════════════
     required: true,
     initialValues: ['dashboard'],
   });
-  if (p.isCancel(channels)) return handleCancel();
+  if (p.isCancel(channels)) return handleCancel(p);
   data.channels = channels as string[];
 
   // Step 12: Telegram Setup (if selected)
@@ -292,7 +294,7 @@ ${color.cyan('╚═════════════════════
         return undefined;
       },
     });
-    if (p.isCancel(telegramToken)) return handleCancel();
+    if (p.isCancel(telegramToken)) return handleCancel(p);
     data.telegramToken = telegramToken as string;
 
     const telegramChatId = await p.text({
@@ -303,7 +305,7 @@ ${color.cyan('╚═════════════════════
         return undefined;
       },
     });
-    if (p.isCancel(telegramChatId)) return handleCancel();
+    if (p.isCancel(telegramChatId)) return handleCancel(p);
     data.telegramChatId = telegramChatId as string;
   }
 
@@ -316,7 +318,7 @@ ${color.cyan('╚═════════════════════
       { value: 'aggressive', label: '🦁 Aggressive', hint: 'Seek opportunities' },
     ],
   });
-  if (p.isCancel(tradingStyle)) return handleCancel();
+  if (p.isCancel(tradingStyle)) return handleCancel(p);
   data.tradingStyle = tradingStyle as string;
 
   // Step 14: Market Data API Keys (for Stocks & Forex analysis)
@@ -450,7 +452,7 @@ ${color.cyan('Next steps:')}
 // Helper Functions
 // ============================================================================
 
-function handleCancel(): void {
+function handleCancel(p: any): void {
   p.cancel('Setup cancelled.');
   process.exit(0);
 }
