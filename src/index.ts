@@ -141,7 +141,9 @@ export async function startKit(overrides?: {
 }
 
 // CLI Entry
-if (require.main === module) {
+const isMainModule = typeof require !== 'undefined' && require.main === module;
+const isDirectRun = process.argv[1] && (process.argv[1].endsWith('index.ts') || process.argv[1].endsWith('index.js'));
+if (isMainModule || isDirectRun) {
   startKit().catch(err => {
     console.error('Failed to start K.I.T.:', err);
     process.exit(1);
