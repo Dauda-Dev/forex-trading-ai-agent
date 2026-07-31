@@ -52,51 +52,83 @@ export function registerBacktestCommand(program: Command): void {
       console.log(`Period:    ${options.start || '90 days ago'} to ${options.end || 'now'}`);
       console.log('');
       
-      // Simulate backtest (in real implementation, this would run actual backtest)
-      console.log('⏳ Fetching historical data...');
-      await sleep(500);
+      console.log('⏳ Fetching historical data from Binance...');
       
-      console.log('⏳ Running strategy simulation...');
-      await sleep(1000);
-      
-      // Generate mock results
-      const result: BacktestResult = {
-        id: `bt_${Date.now()}`,
-        strategy: options.strategy,
-        symbol: options.symbol.toUpperCase(),
-        timeframe: options.timeframe,
-        startDate: options.start || new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
-        endDate: options.end || new Date().toISOString().split('T')[0],
-        trades: Math.floor(Math.random() * 100) + 50,
-        winRate: Math.random() * 30 + 45, // 45-75%
-        totalReturn: Math.random() * 40 - 10, // -10% to +30%
-        maxDrawdown: Math.random() * 15 + 5, // 5-20%
-        sharpeRatio: Math.random() * 2 + 0.5, // 0.5-2.5
-        profitFactor: Math.random() * 1.5 + 0.8, // 0.8-2.3
-        runAt: new Date().toISOString(),
-      };
-      
-      // Save result
-      saveBacktest(result);
-      
-      if (options.json) {
-        console.log(JSON.stringify(result, null, 2));
-        return;
+      try {
+        const { Backtester, STRATEGIES } = await import('../../tools/backtester');
+        
+        const bt = new Backtester('binance');
+        const strategyKey = Object.keys(STRATEGIES).find(
+          k => k.toLowerCase() === options.strategy.toLowerCase()
+        ) || options.strategy;
+        
+        const strategyMeta = STRATEGIES[strategyKey];
+        if (!strategyMeta) {
+          console.error(`❌ Strategy "${options.strategy}" not found.`);
+          console.log(`Available: ${Object.keys(STRATEGIES).join(', ')}`);
+          process.exit(1);
+        }
+        
+        const result = await bt.runBacktest(strategyKey, {
+          symbol: options.symbol.toUpperCase(),
+          timeframe: options.timeframe,
+          startDate: options.start ? new Date(options.start) : new Date(Date.now() - 90 * 24 * 60 * 60 * 1000),
+          endDate: options.end ? new Date(options.end) : undefined,
+          initialCapital: options.capital || 10000,
+          positionSizePct: 20,
+          commission: 0.001,
+          slippage: 0.0005,
+        });
+        
+        const saved: BacktestResult = {
+          id: `bt_${Date.now()}`,
+          strategy: result.strategy,
+          symbol: result.config.symbol,
+          timeframe: result.config.timeframe,
+          startDate: result.startDate.toISOString().split('T')[0],
+          endDate: result.endDate.toISOString().split('T')[0],
+          trades: result.totalTrades,
+          winRate: result.winRate,
+          totalReturn: result.totalReturnPct,
+          maxDrawdown: result.maxDrawdownPct,
+          sharpeRatio: result.sharpeRatio,
+          profitFactor: result.profitFactor,
+          runAt: new Date().toISOString(),
+        };
+        
+        saveBacktest(saved);
+        
+        if (options.json) {
+          console.log(JSON.stringify({ ...saved, full: result }, null, 2));
+          return;
+        }
+        
+        console.log('\n✅ Backtest Complete!\n');
+        console.log('━'.repeat(50));
+        console.log(`📈 Results: ${result.strategy} on ${result.config.symbol}`);
+        console.log('━'.repeat(50));
+        console.log(`Period:        ${result.startDate.toISOString().split('T')[0]} to ${result.endDate.toISOString().split('T')[0]}`);
+        console.log(`Candles:       ${result.totalCandles}`);
+        console.log(`Trades:        ${result.totalTrades} (${result.winningTrades}W / ${result.losingTrades}L)`);
+        console.log(`Win Rate:      ${(result.winRate * 100).toFixed(1)}%`);
+        console.log(`Total Return:  ${result.totalReturnPct >= 0 ? '+' : ''}${result.totalReturnPct.toFixed(2)}%`);
+        console.log(`Buy & Hold:    ${result.buyHoldReturnPct >= 0 ? '+' : ''}${result.buyHoldReturnPct.toFixed(2)}%`);
+        console.log(`Alpha:         ${result.alpha >= 0 ? '+' : ''}${result.alpha.toFixed(2)}%`);
+        console.log('━'.repeat(50));
+        console.log(`Max Drawdown:  -${result.maxDrawdownPct.toFixed(2)}%`);
+        console.log(`Sharpe Ratio:  ${result.sharpeRatio.toFixed(2)}`);
+        console.log(`Sortino Ratio: ${result.sortinoRatio.toFixed(2)}`);
+        console.log(`Profit Factor: ${result.profitFactor.toFixed(2)}`);
+        console.log(`Volatility:    ${(result.volatility * 100).toFixed(2)}%`);
+        console.log('━'.repeat(50));
+        console.log(`Final Capital: $${result.finalCapital.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`);
+        console.log(`\n💡 Full report saved: ${saved.id}`);
+        console.log('   View with: kit backtest show ' + saved.id);
+        
+      } catch (error: any) {
+        console.error(`❌ Backtest failed: ${error.message}`);
+        process.exit(1);
       }
-      
-      console.log('\n✅ Backtest Complete!\n');
-      console.log('━'.repeat(50));
-      console.log(`📈 Results: ${result.strategy} on ${result.symbol}`);
-      console.log('━'.repeat(50));
-      console.log(`Trades:        ${result.trades}`);
-      console.log(`Win Rate:      ${result.winRate.toFixed(1)}%`);
-      console.log(`Total Return:  ${result.totalReturn >= 0 ? '+' : ''}${result.totalReturn.toFixed(2)}%`);
-      console.log(`Max Drawdown:  -${result.maxDrawdown.toFixed(2)}%`);
-      console.log(`Sharpe Ratio:  ${result.sharpeRatio.toFixed(2)}`);
-      console.log(`Profit Factor: ${result.profitFactor.toFixed(2)}`);
-      console.log('━'.repeat(50));
-      console.log(`\n💡 Full report saved: ${result.id}`);
-      console.log('   View with: kit backtest show ' + result.id);
     });
 
   // List backtests
@@ -245,14 +277,12 @@ export function registerBacktestCommand(program: Command): void {
       console.log('📋 Available Strategies\n');
       
       const strategies = [
-        { name: 'RSI', desc: 'Relative Strength Index oversold/overbought' },
-        { name: 'MACD', desc: 'Moving Average Convergence Divergence crossover' },
-        { name: 'EMA_Cross', desc: 'Exponential Moving Average crossover' },
-        { name: 'Bollinger', desc: 'Bollinger Bands mean reversion' },
-        { name: 'Trend_Follow', desc: 'Trend following with ADX' },
-        { name: 'Breakout', desc: 'Support/resistance breakout' },
-        { name: 'Mean_Reversion', desc: 'Statistical mean reversion' },
-        { name: 'Momentum', desc: 'Price momentum strategy' },
+        { name: 'rsi', desc: 'RSI Mean Reversion — buy oversold, sell overbought' },
+        { name: 'emaCrossover', desc: 'EMA Crossover — buy when fast crosses above slow' },
+        { name: 'bollingerBands', desc: 'Bollinger Bands — buy at lower band, sell at upper' },
+        { name: 'macd', desc: 'MACD Crossover — buy/sell on MACD/signal cross' },
+        { name: 'smaTrend', desc: 'SMA Trend Following — long above SMA, exit below' },
+        { name: 'rsiEma', desc: 'RSI + EMA Combo — RSI oversold + price above EMA' },
       ];
       
       for (const s of strategies) {

@@ -34,7 +34,7 @@ describe('Config', () => {
 
     it('should have heartbeat enabled by default', () => {
       expect(DEFAULT_CONFIG.heartbeat?.enabled).toBe(true);
-      expect(DEFAULT_CONFIG.heartbeat?.every).toBe('30m');
+      expect(DEFAULT_CONFIG.heartbeat?.every).toBe('5m');
     });
 
     it('should have cron enabled by default', () => {

@@ -48,20 +48,20 @@ export function getPythonPath(): string {
     } catch {}
   }
   
-  // Windows: Check common installation paths
+  // Windows: Check common installation paths (prioritize 3.12 for MT5)
   if (isWindows) {
     const windowsPaths = [
-      'C:\\Python314\\python.exe',
-      'C:\\Python313\\python.exe',
-      'C:\\Python312\\python.exe',
-      'C:\\Python311\\python.exe',
-      'C:\\Python310\\python.exe',
-      path.join(os.homedir(), 'AppData\\Local\\Programs\\Python\\Python314\\python.exe'),
-      path.join(os.homedir(), 'AppData\\Local\\Programs\\Python\\Python313\\python.exe'),
       path.join(os.homedir(), 'AppData\\Local\\Programs\\Python\\Python312\\python.exe'),
       path.join(os.homedir(), 'AppData\\Local\\Programs\\Python\\Python311\\python.exe'),
       path.join(os.homedir(), 'AppData\\Local\\Programs\\Python\\Python310\\python.exe'),
-      'C:\\Program Files\\Python314\\python.exe',
+      path.join(os.homedir(), 'AppData\\Local\\Programs\\Python\\Python314\\python.exe'),
+      path.join(os.homedir(), 'AppData\\Local\\Programs\\Python\\Python313\\python.exe'),
+      'C:\\Python312\\python.exe',
+      'C:\\Python311\\python.exe',
+      'C:\\Python310\\python.exe',
+      'C:\\Python314\\python.exe',
+      'C:\\Python313\\python.exe',
+      'C:\\Program Files\\Python312\\python.exe',
       'C:\\Program Files\\Python311\\python.exe',
     ];
     

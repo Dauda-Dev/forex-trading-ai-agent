@@ -9,6 +9,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { execSync } from 'child_process';
+import { getPythonPath } from './skill-bridge';
 import { ToolDefinition as ChatToolDef } from '../gateway/chat-manager';
 
 // ============================================================================
@@ -245,7 +246,8 @@ function execMT5(cmd: string): any {
   if (!fs.existsSync(script)) return { success: false, error: 'MT5 script not found' };
   
   try {
-    const result = execSync(`python "${script}" ${cmd}`, {
+    const pythonCmd = getPythonPath();
+    const result = execSync(`"${pythonCmd}" "${script}" ${cmd}`, {
       encoding: 'utf-8', timeout: 30000, windowsHide: true,
     });
     return JSON.parse(result.trim());

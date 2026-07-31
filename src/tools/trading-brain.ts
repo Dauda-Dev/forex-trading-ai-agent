@@ -15,6 +15,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { execSync } from 'child_process';
 import { ToolDefinition as ChatToolDef } from '../gateway/chat-manager';
+import { getPythonPath } from './skill-bridge';
 
 // ============================================================================
 // Tool Definitions
@@ -194,7 +195,9 @@ function loadAll(): Record<string, TradingStrategy> {
   try {
     const p = getDataPath();
     if (fs.existsSync(p)) {
-      const data = JSON.parse(fs.readFileSync(p, 'utf-8'));
+      const raw = JSON.parse(fs.readFileSync(p, 'utf-8'));
+      // Support both { "strategies": {...} } and flat {...} formats
+      const data = raw.strategies || raw;
       console.log(`[Trading Brain] Loaded ${Object.keys(data).length} strategies from ${p}`);
       return data;
     }
@@ -206,7 +209,7 @@ function loadAll(): Record<string, TradingStrategy> {
 
 function saveAll(data: Record<string, TradingStrategy>): void {
   const p = getDataPath();
-  fs.writeFileSync(p, JSON.stringify(data, null, 2));
+  fs.writeFileSync(p, JSON.stringify({ strategies: data }, null, 2));
   console.log(`[Trading Brain] Saved ${Object.keys(data).length} strategies to ${p}`);
 }
 
@@ -224,7 +227,8 @@ function mt5(cmd: string): any {
   if (!script) return { success: false, error: 'MT5 script not found' };
   
   try {
-    const out = execSync(`python "${script}" ${cmd}`, {
+    const pythonCmd = getPythonPath();
+    const out = execSync(`"${pythonCmd}" "${script}" ${cmd}`, {
       encoding: 'utf-8', timeout: 30000, windowsHide: true,
     });
     return JSON.parse(out.trim());

@@ -473,27 +473,49 @@ export class SlackChannel extends EventEmitter {
  * Create Slack channel from config
  */
 export function createSlackChannel(): SlackChannel | null {
-  if (!fs.existsSync(CONFIG_PATH)) {
-    return null;
-  }
+  let botToken: string | undefined;
+  let appToken: string | undefined;
+  let signingSecret: string | undefined;
+  let allowedChannelIds: string[] | undefined;
+  let allowedUserIds: string[] | undefined;
+  let respondToBots: boolean | undefined;
+  let respondToMentionsOnly: boolean | undefined;
+  let useSocketMode: boolean | undefined;
+  let port: number | undefined;
 
-  const config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
-  const slack = config.channels?.slack;
+  try {
+    if (fs.existsSync(CONFIG_PATH)) {
+      const config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
+      const slack = config.channels?.slack;
+      if (slack?.botToken) {
+        botToken = slack.botToken;
+        appToken = slack.appToken;
+        signingSecret = slack.signingSecret;
+        allowedChannelIds = slack.allowedChannelIds;
+        allowedUserIds = slack.allowedUserIds;
+        respondToBots = slack.respondToBots;
+        respondToMentionsOnly = slack.respondToMentionsOnly;
+        useSocketMode = slack.useSocketMode;
+        port = slack.port;
+      }
+    }
+  } catch { /* ignore */ }
 
-  if (!slack?.botToken || !slack?.appToken) {
-    return null;
-  }
+  if (!botToken) botToken = process.env.SLACK_BOT_TOKEN;
+  if (!appToken) appToken = process.env.SLACK_APP_TOKEN;
+  if (!signingSecret) signingSecret = process.env.SLACK_SIGNING_SECRET;
+  if (!botToken || !appToken) return null;
 
   return new SlackChannel({
-    botToken: slack.botToken,
-    appToken: slack.appToken,
-    signingSecret: slack.signingSecret,
-    allowedChannelIds: slack.allowedChannelIds,
-    allowedUserIds: slack.allowedUserIds,
-    respondToBots: slack.respondToBots,
-    respondToMentionsOnly: slack.respondToMentionsOnly,
-    useSocketMode: slack.useSocketMode ?? true,
-    port: slack.port,
+    botToken,
+    appToken,
+    signingSecret,
+    allowedChannelIds,
+    allowedUserIds,
+    respondToBots,
+    respondToMentionsOnly,
+    useSocketMode: useSocketMode ?? true,
+    port,
   });
 }
 
@@ -501,9 +523,13 @@ export function createSlackChannel(): SlackChannel | null {
  * Check if Slack credentials exist
  */
 export function hasSlackCredentials(): boolean {
-  if (!fs.existsSync(CONFIG_PATH)) return false;
-  const config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
-  return !!(config.channels?.slack?.botToken && config.channels?.slack?.appToken);
+  try {
+    if (fs.existsSync(CONFIG_PATH)) {
+      const config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
+      if (config.channels?.slack?.botToken && config.channels?.slack?.appToken) return true;
+    }
+  } catch { /* ignore */ }
+  return !!(process.env.SLACK_BOT_TOKEN && process.env.SLACK_APP_TOKEN);
 }
 
 /**

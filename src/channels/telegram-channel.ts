@@ -490,26 +490,42 @@ export class TelegramChannel extends EventEmitter {
 }
 
 /**
- * Create channel from config
+ * Create channel from config (checks config.json first, then env vars)
  */
 export function createTelegramChannel(): TelegramChannel | null {
-  if (!fs.existsSync(CONFIG_PATH)) return null;
+  let token: string | undefined;
+  let chatId: string | undefined;
+  let voiceEnabled: boolean | undefined;
+  let openaiApiKey: string | undefined;
 
+  // Try config.json first
   try {
-    const config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
-    const tg = config.channels?.telegram;
-    if (!tg?.token) return null;
+    if (fs.existsSync(CONFIG_PATH)) {
+      const config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
+      const tg = config.channels?.telegram;
+      if (tg?.token) {
+        token = tg.token;
+        chatId = tg.chatId;
+        voiceEnabled = tg.voiceEnabled;
+        openaiApiKey = config.ai?.providers?.openai?.apiKey;
+      }
+    }
+  } catch { /* ignore */ }
 
-    return new TelegramChannel({
-      token: tg.token,
-      chatId: tg.chatId,
-      allowedChatIds: tg.chatId ? [String(tg.chatId)] : undefined,
-      voiceEnabled: tg.voiceEnabled !== false,
-      openaiApiKey: config.ai?.providers?.openai?.apiKey || process.env.OPENAI_API_KEY,
-    });
-  } catch {
-    return null;
-  }
+  // Fallback to env vars
+  if (!token) token = process.env.TELEGRAM_BOT_TOKEN;
+  if (!chatId) chatId = process.env.TELEGRAM_CHAT_ID;
+  if (!openaiApiKey) openaiApiKey = process.env.OPENAI_API_KEY;
+
+  if (!token) return null;
+
+  return new TelegramChannel({
+    token,
+    chatId,
+    allowedChatIds: chatId ? [String(chatId)] : undefined,
+    voiceEnabled: voiceEnabled !== false,
+    openaiApiKey,
+  });
 }
 
 /**

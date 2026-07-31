@@ -188,8 +188,24 @@ function getPythonCommand(): string {
   const isWindows = process.platform === 'win32';
   
   if (isWindows) {
-    // On Windows, use py launcher to specify Python 3.12
-    // This works even if python.exe points to 3.14
+    // Check for Python 3.12 installation in user's AppData (most common)
+    const fs = require('fs');
+    const os = require('os');
+    const path = require('path');
+    
+    const candidatePaths = [
+      path.join(os.homedir(), 'AppData\\Local\\Programs\\Python\\Python312\\python.exe'),
+      'C:\\Python312\\python.exe',
+      'C:\\Program Files\\Python312\\python.exe',
+    ];
+    
+    for (const p of candidatePaths) {
+      if (fs.existsSync(p)) {
+        return `"${p}"`;
+      }
+    }
+    
+    // Fallback to py launcher
     return 'py -3.12';
   }
   

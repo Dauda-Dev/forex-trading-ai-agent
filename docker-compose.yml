@@ -1,0 +1,51 @@
+version: "3.8"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: kit-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: kit
+      POSTGRES_USER: kit
+      POSTGRES_PASSWORD: kit
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kit -d kit"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  kit:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: kit-trading
+    ports:
+      - "18799:18799"
+    volumes:
+      - kit_state:/root/.kit
+    environment:
+      - NODE_ENV=production
+      - DATABASE_URL=postgresql://kit:kit@postgres:5432/kit
+      - KIT_GATEWAY_TOKEN=${KIT_GATEWAY_TOKEN:-}
+      - KIT_AI_PROVIDER=${KIT_AI_PROVIDER:-google}
+      - KIT_AI_MODEL=${KIT_AI_MODEL:-gemini-flash-latest}
+      - KIT_AI_API_KEY=${KIT_AI_API_KEY:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:18799/health"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 30s
+
+volumes:
+  pg_data:
+  kit_state:

@@ -108,7 +108,7 @@ export const DEFAULT_CONFIG: KITConfig = {
   onboarded: false,
   gateway: { port: 18799, host: '127.0.0.1' },
   agent: { id: 'main', name: 'K.I.T.' },
-  heartbeat: { enabled: true, every: '30m' },
+  heartbeat: { enabled: true, every: '5m' },
   cron: { enabled: true },
   memory: {},
 };

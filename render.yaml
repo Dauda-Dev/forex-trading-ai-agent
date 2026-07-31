@@ -1,0 +1,32 @@
+# render.yaml — Infrastructure-as-Code for Render.com
+# Deploy K.I.T. as a Web Service with a persistent disk.
+
+services:
+  - type: web
+    name: kit-trading
+    env: docker
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    plan: starter
+    autoDeploy: false
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: KIT_GATEWAY_TOKEN
+        sync: false
+      - key: KIT_AI_PROVIDER
+        value: google
+      - key: KIT_AI_MODEL
+        value: gemini-flash-latest
+      - key: KIT_AI_API_KEY
+        sync: false
+      - key: RENDER_DISK_PATH
+        fromService:
+          type: web
+          name: kit-trading
+          property: diskPath
+    disk:
+      name: kit-data
+      mountPath: /opt/kit-data
+      sizeGB: 1

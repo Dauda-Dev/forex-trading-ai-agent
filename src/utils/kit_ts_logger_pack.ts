@@ -1,10 +1,24 @@
 /**
- * Bridge K.I.T.'s core Logger to the ts-logger-pack Logger shape (console-like arity).
+ * Bridge K.I.T.'s core Logger to a console-like Logger shape.
  */
 
-import type { Logger as TsPackLogger } from 'ts-logger-pack';
-import { dummyLogger } from 'ts-logger-pack';
 import type { Logger as KitLogger } from '../core/logger';
+
+export interface TsPackLogger {
+  trace(message?: any, ...optionalParams: any[]): void;
+  debug(message?: any, ...optionalParams: any[]): void;
+  info(message?: any, ...optionalParams: any[]): void;
+  warn(message?: any, ...optionalParams: any[]): void;
+  error(message?: any, ...optionalParams: any[]): void;
+}
+
+export const dummyLogger: TsPackLogger = {
+  trace: () => {},
+  debug: () => {},
+  info: () => {},
+  warn: () => {},
+  error: () => {},
+};
 
 function metaFromOptionalParams(optionalParams: any[]): Record<string, unknown> | undefined {
   if (optionalParams.length === 0) return undefined;
@@ -20,7 +34,7 @@ function metaFromOptionalParams(optionalParams: any[]): Record<string, unknown> 
 }
 
 /**
- * Wrap a K.I.T. core logger so libraries expecting ts-logger-pack's Logger can use it.
+ * Wrap a K.I.T. core logger so libraries expecting a console-like logger can use it.
  */
 export function kitLoggerToTsPack(kit: KitLogger | null | undefined): TsPackLogger {
   if (!kit) {

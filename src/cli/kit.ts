@@ -16,6 +16,9 @@
 
 import { Command } from 'commander';
 import * as path from 'path';
+
+// Load .env file into process.env
+try { require('dotenv').config(); } catch {}
 import * as fs from 'fs';
 import * as os from 'os';
 
@@ -98,12 +101,17 @@ program
   .option('-h, --host <host>', 'Host to bind to', '127.0.0.1')
   .option('-d, --detach', 'Run in background')
   .option('-t, --token <token>', 'Gateway auth token')
+  .option('--demo', 'Start in demo/paper trading mode (no real trades)')
   .option('--no-autonomous', 'Disable autonomous mode')
   .option('--no-telegram', 'Disable Telegram channel')
   .option('--no-dashboard', 'Do not open dashboard in browser')
   .action(async (options) => {
     const { createGatewayServer } = await import('../gateway/server');
+    const { initDatabase, closeDatabase } = await import('../persistence');
     const { loadConfig, DEFAULT_CONFIG } = await import('../config');
+    
+    // Initialize database
+    await initDatabase();
     
     // Load config and merge with CLI options
     const config = loadConfig();
@@ -173,6 +181,12 @@ program
       const { getAutonomousAgent } = await import('../core/autonomous-agent');
       autonomousAgent = getAutonomousAgent();
       
+      // Wire --demo flag to paper trading mode
+      if (options.demo) {
+        autonomousAgent.updateSettings({ paperTrading: true });
+        console.log('📝 Paper trading mode enabled (--demo)');
+      }
+      
       // Configure Telegram from config or env (DEFAULT: ON if configured)
       const telegramToken = process.env.TELEGRAM_BOT_TOKEN || config.channels?.telegram?.token;
       const telegramChatId = process.env.TELEGRAM_CHAT_ID || config.channels?.telegram?.chatId;
@@ -203,9 +217,72 @@ program
       console.log(result);
     }
     
+    // Start BrainCore — the decision engine that drives autonomous trading
+    let brainCore: any = null;
+    if (options.autonomous !== false) {
+      const { createBrainCore } = await import('../brain/brain-core');
+      brainCore = createBrainCore({
+        autonomyLevel: 3,
+        paperTrade: !!options.demo,
+        verbose: true,
+        analysisInterval: 60000, // 1 minute
+      });
+      
+      // Connect to AutonomousAgent for execution
+      if (autonomousAgent) {
+        brainCore.setExecutionAgent(autonomousAgent);
+        
+        // Sync portfolio value from agent
+        const agentState = autonomousAgent.getState();
+        if (agentState.totalValueUSD > 0) {
+          brainCore.setPortfolioValue(agentState.totalValueUSD);
+        }
+      }
+      
+      // Set a default growth goal
+      await brainCore.setGoal('Growth with medium risk, focus on forex and crypto');
+      
+      // Activate the brain — starts the analysis → decision → execution loop
+      brainCore.activate();
+      console.log('\n🧠 BrainCore ACTIVATED — analyzing markets every 60s');
+      
+      // Wire brain events → gateway alerts
+      brainCore.on('event', (event: any) => {
+        if (event.type === 'trade_executed') {
+          gateway.pushAlert(
+            'trade_executed',
+            `Trade Executed: ${event.decision?.action?.side?.toUpperCase()} ${event.decision?.action?.asset?.symbol}`,
+            `Amount: $${event.decision?.action?.amount} — ${event.result?.success ? 'Filled' : 'Failed'}`,
+            event.result?.success ? 'success' : 'error',
+            event
+          );
+        } else if (event.type === 'trade_failed') {
+          gateway.pushAlert(
+            'trade_failed',
+            `Trade Failed: ${event.decision?.action?.asset?.symbol}`,
+            event.decision?.executionResult?.error || 'Execution error',
+            'error',
+            event
+          );
+        } else if (event.type === 'opportunity_detected') {
+          gateway.pushAlert(
+            'opportunity',
+            `Opportunity: ${event.opportunity?.asset?.symbol}`,
+            `${event.opportunity?.action} — Confidence: ${event.opportunity?.confidenceScore}%`,
+            'info',
+            event
+          );
+        }
+      });
+    }
+    
     // Graceful shutdown
     const shutdown = async () => {
       console.log('\n👋 Shutting down K.I.T. Gateway...');
+      if (brainCore) {
+        brainCore.deactivate();
+        console.log('🧠 BrainCore deactivated');
+      }
       if (autonomousAgent) {
         await autonomousAgent.stop();
       }

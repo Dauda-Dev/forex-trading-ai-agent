@@ -3,10 +3,20 @@
     "autonomous-paper-trader": {
       "id": "autonomous-paper-trader",
       "name": "Autonomous Paper Trader",
-      "symbols": ["BTCUSDT", "ETHUSDT", "XAUUSD", "EURUSD", "SOLUSDT"],
+      "symbols": [
+        "BTCUSDT",
+        "ETHUSDT",
+        "XAUUSD",
+        "EURUSD",
+        "SOLUSDT"
+      ],
       "timeframe": "1h",
       "indicators": {
-        "rsi": {"period": 14, "overbought": 70, "oversold": 30},
+        "rsi": {
+          "period": 14,
+          "overbought": 70,
+          "oversold": 30
+        },
         "ema_fast": 12,
         "ema_slow": 26,
         "atr": 14
@@ -27,7 +37,7 @@
       "mode": "paper",
       "capital": 1000,
       "currency": "EUR",
-      "last_check": "",
+      "last_check": "2026-07-28T21:27:03.849Z",
       "created_at": "2026-02-17T02:35:00.000Z",
       "trades": [],
       "stats": {
@@ -37,6 +47,57 @@
         "total_pnl": 0,
         "win_rate": 0
       }
+    },
+    "Gold_EMA_RSI_Scalper": {
+      "name": "Gold_EMA_RSI_Scalper",
+      "asset": "XAUUSD",
+      "strategy": "Buy when EMA21 > EMA50 and RSI > 52. Sell when EMA21 < EMA50 and RSI < 48 on XAUUSD M5 chart.",
+      "platform": "mt5",
+      "timeframe": "M5",
+      "mode": "rules",
+      "entry_long": [
+        {
+          "indicator": "EMA21",
+          "condition": ">",
+          "target": "EMA50"
+        },
+        {
+          "condition": ">",
+          "indicator": "RSI14",
+          "target": 52
+        }
+      ],
+      "entry_short": [
+        {
+          "target": "EMA50",
+          "condition": "<",
+          "indicator": "EMA21"
+        },
+        {
+          "target": 48,
+          "condition": "<",
+          "indicator": "RSI14"
+        }
+      ],
+      "lot_size": 0.1,
+      "risk_percent": 1,
+      "sl_atr": 1.5,
+      "tp_atr": 3,
+      "trailing_stop": true,
+      "trailing_atr": 1.5,
+      "max_spread": 50,
+      "max_positions": 2,
+      "max_daily_trades": 10,
+      "check_minutes": 5,
+      "status": "running",
+      "created": "2026-07-28T10:15:13.460Z",
+      "trades_today": 0,
+      "total_trades": 0,
+      "wins": 0,
+      "losses": 0,
+      "profit": 0,
+      "trades": [],
+      "last_check": "2026-07-28T21:32:15.281Z"
     }
   }
 }

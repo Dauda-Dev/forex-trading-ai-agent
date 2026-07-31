@@ -93,7 +93,7 @@ export const canvasChartToolDefinition: ToolDefinition = {
         enum: ['candles', 'line', 'area', 'bars'],
       },
       studies: {
-        type: 'string',
+        type: 'array',
         items: { type: 'string' },
         description: 'Technical indicators to add (e.g., ["RSI", "MACD", "BB"]).',
       },

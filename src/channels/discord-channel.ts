@@ -864,28 +864,44 @@ export class DiscordChannel extends EventEmitter {
 }
 
 /**
- * Create Discord channel from config
+ * Create Discord channel from config (config.json first, then env vars)
  */
 export function createDiscordChannel(): DiscordChannel | null {
-  if (!fs.existsSync(CONFIG_PATH)) {
-    return null;
-  }
+  let token: string | undefined;
+  let allowedGuildIds: string[] | undefined;
+  let allowedChannelIds: string[] | undefined;
+  let allowedUserIds: string[] | undefined;
+  let respondToBots: boolean | undefined;
+  let respondToMentionsOnly: boolean | undefined;
+  let prefix: string | undefined;
 
-  const config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
-  const discord = config.channels?.discord;
+  try {
+    if (fs.existsSync(CONFIG_PATH)) {
+      const config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
+      const discord = config.channels?.discord;
+      if (discord?.token) {
+        token = discord.token;
+        allowedGuildIds = discord.allowedGuildIds;
+        allowedChannelIds = discord.allowedChannelIds;
+        allowedUserIds = discord.allowedUserIds;
+        respondToBots = discord.respondToBots;
+        respondToMentionsOnly = discord.respondToMentionsOnly;
+        prefix = discord.prefix;
+      }
+    }
+  } catch { /* ignore */ }
 
-  if (!discord?.token) {
-    return null;
-  }
+  if (!token) token = process.env.DISCORD_BOT_TOKEN;
+  if (!token) return null;
 
   return new DiscordChannel({
-    token: discord.token,
-    allowedGuildIds: discord.allowedGuildIds,
-    allowedChannelIds: discord.allowedChannelIds,
-    allowedUserIds: discord.allowedUserIds,
-    respondToBots: discord.respondToBots,
-    respondToMentionsOnly: discord.respondToMentionsOnly,
-    prefix: discord.prefix,
+    token,
+    allowedGuildIds,
+    allowedChannelIds,
+    allowedUserIds,
+    respondToBots,
+    respondToMentionsOnly,
+    prefix,
   });
 }
 
@@ -893,9 +909,13 @@ export function createDiscordChannel(): DiscordChannel | null {
  * Check if Discord credentials exist
  */
 export function hasDiscordCredentials(): boolean {
-  if (!fs.existsSync(CONFIG_PATH)) return false;
-  const config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
-  return !!config.channels?.discord?.token;
+  try {
+    if (fs.existsSync(CONFIG_PATH)) {
+      const config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
+      if (config.channels?.discord?.token) return true;
+    }
+  } catch { /* ignore */ }
+  return !!process.env.DISCORD_BOT_TOKEN;
 }
 
 /**

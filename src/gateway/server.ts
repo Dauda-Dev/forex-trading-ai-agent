@@ -13,7 +13,7 @@
  */
 
 import { WebSocketServer, WebSocket } from 'ws';
-import { Server as HttpServer, createServer } from 'http';
+import { Server as HttpServer, createServer, IncomingMessage, ServerResponse } from 'http';
 import * as path from 'path';
 import { EventEmitter } from 'eventemitter3';
 
@@ -41,6 +41,7 @@ import { SlackChannel, createSlackChannel, hasSlackCredentials } from '../channe
 import { getBinaryFasterState } from '../tools/binary-options-tools';
 import { HooksManager, initHooks, getHooksManager } from './hooks';
 import { loadConfig } from '../config';
+import { BacktesterBackend, createBacktesterBackend } from './backtester-backend';
 
 // ============================================================================
 // Types
@@ -52,6 +53,7 @@ export interface GatewayConfig {
   token?: string;
   stateDir: string;
   workspaceDir: string;
+  dashboardDir?: string;
   agent: AgentConfig;
   heartbeat: HeartbeatConfig;
   cron: CronConfig;
@@ -96,10 +98,21 @@ export interface Client {
   connectedAt: Date;
 }
 
+export interface GatewayAlert {
+  id: string;
+  kind: 'trade_executed' | 'trade_failed' | 'opportunity' | 'system' | 'error';
+  title: string;
+  message: string;
+  severity: 'info' | 'success' | 'warning' | 'error';
+  timestamp: string;
+  data?: any;
+}
+
 export interface GatewayState {
   status: 'starting' | 'running' | 'stopping' | 'stopped';
   startedAt?: Date;
   clients: Map<string, Client>;
+  alerts: GatewayAlert[];
   health: {
     uptime: number;
     clientCount: number;
@@ -107,6 +120,8 @@ export interface GatewayState {
     memoryIndexed: boolean;
   };
 }
+
+import { initDatabase, closeDatabase, getAllTrades, getOpenTrades, getRecentDecisions, getPendingDecisions, getLatestPerformance, getPerformanceHistory, getRecentAlerts, insertAlert, getPortfolioHistory, getTradeStats, getTradeHistoryByDay } from '../persistence';
 
 // ============================================================================
 // Gateway Server
@@ -134,15 +149,20 @@ export class GatewayServer extends EventEmitter {
   // State
   private state: GatewayState;
   private eventSeq: number = 0;
+  private backtender: BacktesterBackend;
   
   constructor(config: Partial<GatewayConfig> = {}) {
     super();
     
-    const defaultStateDir = path.join(process.env.HOME || '', '.kit');
+    const defaultStateDir = path.join(
+      process.env.RENDER_DISK_PATH || process.env.HOME || '', 
+      '.kit'
+    );
     
     this.config = {
-      port: config.port || 18799,
-      host: config.host || '127.0.0.1',
+      port: config.port || parseInt(process.env.PORT || '18799', 10),
+      host: config.host || process.env.HOST || '127.0.0.1',
+      dashboardDir: config.dashboardDir || path.join(__dirname, '..', 'dashboard', 'dist'),
       token: config.token || process.env.KIT_GATEWAY_TOKEN,
       stateDir: config.stateDir || defaultStateDir,
       workspaceDir: config.workspaceDir || path.join(defaultStateDir, 'workspace'),
@@ -155,6 +175,7 @@ export class GatewayServer extends EventEmitter {
     this.state = {
       status: 'stopped',
       clients: new Map(),
+      alerts: [],
       health: {
         uptime: 0,
         clientCount: 0,
@@ -164,7 +185,7 @@ export class GatewayServer extends EventEmitter {
     };
     
     // Initialize HTTP server with dashboard
-    this.httpServer = createServer((req, res) => {
+    this.httpServer = createServer(async (req, res) => {
       const fs = require('fs');
       
       // Version endpoint (for quick checks)
@@ -201,14 +222,20 @@ export class GatewayServer extends EventEmitter {
         return;
       }
       
-      // Serve dashboard - always use inline for reliability
+      // Serve dashboard - React SPA (if built) or inline fallback
       if (req.url === '/' || req.url === '/index.html') {
+        if (this.serveReactApp(req, res, '/index.html')) return;
         res.writeHead(200, { 
           'Content-Type': 'text/html',
           'Cache-Control': 'no-cache, no-store, must-revalidate'
         });
         res.end(this.getInlineDashboard());
         return;
+      }
+      
+      // Serve React static assets (JS, CSS, etc.)
+      if (req.url && !req.url.startsWith('/api/') && !req.url.startsWith('/hooks/')) {
+        if (this.serveReactApp(req, res, req.url)) return;
       }
       
       // API status endpoint - returns full dashboard data
@@ -229,6 +256,158 @@ export class GatewayServer extends EventEmitter {
           channels: dashboardData.channels,
           user: dashboardData.user,
         }));
+        return;
+      }
+      
+      // =====================================================
+      // DASHBOARD API ENDPOINTS
+      // =====================================================
+      
+      // GET /api/brain/status - BrainCore status
+      if (req.url === '/api/brain/status') {
+        const brainData = await this.getBrainStatus();
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(brainData));
+        return;
+      }
+      
+      // GET /api/brain/performance - Brain performance metrics
+      if (req.url === '/api/brain/performance') {
+        const perf = await this.getBrainPerformance();
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(perf));
+        return;
+      }
+      
+      // GET /api/brain/decisions - Recent decisions
+      if (req.url?.startsWith('/api/brain/decisions')) {
+        const url = new URL(req.url, `http://${req.headers.host}`);
+        const limit = parseInt(url.searchParams.get('limit') || '50');
+        const decisions = await this.getBrainDecisions(limit);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(decisions));
+        return;
+      }
+      
+      // GET /api/portfolio - Portfolio breakdown (enhanced)
+      if (req.url === '/api/portfolio') {
+        const portfolio = this.getPortfolioDetail();
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(portfolio));
+        return;
+      }
+      
+      // GET /api/portfolio/history - P&L history
+      if (req.url === '/api/portfolio/history') {
+        const history = this.getPortfolioHistory();
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(history));
+        return;
+      }
+      
+      // =====================================================
+      // BACKTEST ENDPOINTS
+      // =====================================================
+      
+      // GET /api/backtest/strategies - Available strategies
+      if (req.url === '/api/backtest/strategies') {
+        const strategies = this.backtender.getStrategies();
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ strategies }));
+        return;
+      }
+      
+      // POST /api/backtest/run - Run a backtest
+      if (req.url === '/api/backtest/run' && req.method === 'POST') {
+        this.handleWebhookRequest(req, res, async (body) => {
+          try {
+            const result = await this.backtender.run(body);
+            return { status: 200, body: result };
+          } catch (e: any) {
+            return { status: 500, body: { error: e.message } };
+          }
+        });
+        return;
+      }
+      
+      // GET /api/backtest/results - List saved results
+      if (req.url?.startsWith('/api/backtest/results')) {
+        const url = new URL(req.url, `http://${req.headers.host}`);
+        const limit = parseInt(url.searchParams.get('limit') || '20');
+        const results = this.backtender.getResults(limit);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ results }));
+        return;
+      }
+      
+      // GET /api/backtest/result/:id - Get specific result
+      if (req.url?.startsWith('/api/backtest/result/')) {
+        const id = req.url.slice('/api/backtest/result/'.length).split('?')[0];
+        const result = this.backtender.getResult(id);
+        if (!result) {
+          res.writeHead(404, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Result not found' }));
+        } else {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(result));
+        }
+        return;
+      }
+      
+      // GET /api/trades - Trade history
+      if (req.url?.startsWith('/api/trades')) {
+        const url = new URL(req.url, `http://${req.headers.host}`);
+        const type = url.searchParams.get('type') || 'all';
+        const trades = this.getTradeHistory(type);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(trades));
+        return;
+      }
+      
+      // GET /api/chart/:symbol - OHLCV data for charts
+      if (req.url?.startsWith('/api/chart/')) {
+        const url = new URL(req.url, `http://${req.headers.host}`);
+        const symbol = decodeURIComponent(req.url.slice('/api/chart/'.length).split('?')[0]);
+        const timeframe = url.searchParams.get('timeframe') || '1h';
+        const limit = parseInt(url.searchParams.get('limit') || '500');
+        
+        (async () => {
+          try {
+            const chartData = await this.getChartData(symbol, timeframe, limit);
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify(chartData));
+          } catch (e: any) {
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: e.message }));
+          }
+        })();
+        return;
+      }
+      
+      // GET /api/chat/history - Chat message history
+      if (req.url?.startsWith('/api/chat/history')) {
+        const url = new URL(req.url, `http://${req.headers.host}`);
+        const sessionId = url.searchParams.get('sessionId') || 'dashboard';
+        try {
+          const history = this.toolChatHandler
+            ? this.toolChatHandler.getHistory(sessionId)
+            : [];
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ messages: history }));
+        } catch (e: any) {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: e.message }));
+        }
+        return;
+      }
+      
+      // GET /api/alerts - Recent alerts from database
+      if (req.url?.startsWith('/api/alerts')) {
+        const url = new URL(req.url, `http://${req.headers.host}`);
+        const limit = parseInt(url.searchParams.get('limit') || '50');
+        const alerts = getRecentAlerts(limit);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ alerts }));
         return;
       }
       
@@ -397,6 +576,7 @@ export class GatewayServer extends EventEmitter {
     });
     
     this.chat = createChatManager(this.config.agent.id);
+    this.backtender = createBacktesterBackend();
     
     // Setup handlers
     this.setupProtocolHandlers();
@@ -440,11 +620,15 @@ export class GatewayServer extends EventEmitter {
         this.state.status = 'running';
         this.state.startedAt = new Date();
         
+        // Initialize SQLite database
+        initDatabase().catch(err => console.error('[DB] Init error:', err));
+
         console.log(`\n✅ Gateway ready!`);
         console.log(`   Dashboard:  http://${this.config.host}:${this.config.port}`);
         console.log(`   WebSocket:  ws://${this.config.host}:${this.config.port}`);
         console.log(`   Agent:      ${this.config.agent.name}`);
         console.log(`   Workspace:  ${this.config.workspaceDir}`);
+        console.log(`   Database:   ~/.kit/kit.db`);
         
         // Start subsystems
         this.startSubsystems();
@@ -497,6 +681,9 @@ export class GatewayServer extends EventEmitter {
     if (this.slackChannel) {
       this.slackChannel.stop();
     }
+    
+    // Flush database
+    await closeDatabase();
     
     // Flush sessions
     await this.sessions.flush();
@@ -658,7 +845,6 @@ export class GatewayServer extends EventEmitter {
       this.telegramChannel = createTelegramChannel();
       
       if (!this.telegramChannel) {
-        console.log('[TG] Not configured - use telegram_setup tool to connect');
         return;
       }
 
@@ -714,7 +900,6 @@ export class GatewayServer extends EventEmitter {
     try {
       // Check if we have credentials
       if (!hasWhatsAppCredentials()) {
-        console.log('[WhatsApp] No credentials found - use "kit whatsapp login" to connect');
         return;
       }
 
@@ -755,7 +940,6 @@ export class GatewayServer extends EventEmitter {
     try {
       // Check if we have credentials
       if (!hasDiscordCredentials()) {
-        console.log('[Discord] Not configured - add discord.token to config');
         return;
       }
 
@@ -796,7 +980,6 @@ export class GatewayServer extends EventEmitter {
     try {
       // Check if we have credentials
       if (!hasSlackCredentials()) {
-        console.log('[Slack] Not configured - add slack.botToken and slack.appToken to config');
         return;
       }
 
@@ -874,6 +1057,20 @@ export class GatewayServer extends EventEmitter {
         }
         if (providers.xai?.apiKey && !process.env.XAI_API_KEY) {
           process.env.XAI_API_KEY = providers.xai.apiKey;
+        }
+      }
+      
+      // Load from simple config format: ai.apiKey + ai.provider
+      if (config.ai?.apiKey && config.ai?.provider) {
+        const envMap: Record<string, string> = {
+          google: 'GOOGLE_API_KEY',
+          openai: 'OPENAI_API_KEY',
+          anthropic: 'ANTHROPIC_API_KEY',
+          groq: 'GROQ_API_KEY',
+        };
+        const envVar = envMap[config.ai.provider];
+        if (envVar && !process.env[envVar]) {
+          process.env[envVar] = config.ai.apiKey;
         }
       }
       
@@ -1588,6 +1785,341 @@ export class GatewayServer extends EventEmitter {
   }
 
   /**
+   * Brain status for dashboard
+   */
+  private async getBrainStatus(): Promise<any> {
+    try {
+      const perf = await getLatestPerformance();
+      const recentDecisions = await getRecentDecisions(20);
+      const pendingDecisions = await getPendingDecisions();
+
+      const fs = require('fs');
+      const configPath = path.join(this.config.stateDir, 'config.json');
+      let autonomy = { level: 1 };
+      let goals: any[] = [];
+      let lastAnalysis = null;
+      try {
+        const kitConfig = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+        autonomy = kitConfig.autonomy || { level: 1 };
+        goals = kitConfig.trading?.goals || [];
+        lastAnalysis = kitConfig.lastAnalysis;
+      } catch {}
+
+      return {
+        active: this.state.status === 'running',
+        goals,
+        autonomy,
+        performance: perf || {},
+        pendingDecisions,
+        recentDecisions,
+        lastAnalysis,
+      };
+    } catch {
+      return { active: false, goals: [], autonomy: { level: 1 }, performance: {}, pendingDecisions: [], recentDecisions: [], lastAnalysis: null };
+    }
+  }
+
+  /**
+   * Brain performance metrics
+   */
+  private async getBrainPerformance(): Promise<any> {
+    try {
+      const perf = await getLatestPerformance();
+      return perf || { totalReturn: 0, totalReturnPercent: 0, dailyPnL: 0, weeklyPnL: 0, totalTrades: 0, winningTrades: 0, winRate: 0, maxDrawdown: 0, sharpeRatio: 0 };
+    } catch {
+      return { totalReturn: 0, totalReturnPercent: 0, dailyPnL: 0, weeklyPnL: 0, totalTrades: 0, winningTrades: 0, winRate: 0, maxDrawdown: 0, sharpeRatio: 0 };
+    }
+  }
+
+  /**
+   * Brain decisions list
+   */
+  private async getBrainDecisions(limit: number): Promise<{ decisions: any[] }> {
+    try {
+      const decisions = await getRecentDecisions(limit);
+      return { decisions };
+    } catch {
+      return { decisions: [] };
+    }
+  }
+
+  /**
+   * Enhanced portfolio detail for the dashboard
+   */
+  private getPortfolioDetail(): any {
+    const base = this.getPortfolioValue();
+    try {
+      const fs = require('fs');
+      const configPath = path.join(this.config.stateDir, 'config.json');
+      const agentPath = path.join(this.config.stateDir, 'autonomous_state.json');
+      
+      let kitConfig: any = {};
+      if (fs.existsSync(configPath)) {
+        kitConfig = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+      }
+      
+      let agentState: any = {};
+      if (fs.existsSync(agentPath)) {
+        agentState = JSON.parse(fs.readFileSync(agentPath, 'utf8'));
+      }
+      
+      // Build allocation by class (inferred from platforms)
+      const byClass = Object.entries(base.platforms).map(([name, value]) => ({
+        name,
+        valueUsd: value as number,
+        percentage: base.totalValue > 0 ? Math.round(((value as number) / base.totalValue) * 100) : 0,
+      }));
+      
+      return {
+        totalValue: base.totalValue,
+        change24h: base.change24h,
+        platforms: base.platforms,
+        byClass,
+        topHoldings: agentState.passivePositions?.slice(0, 10).map((p: any) => ({
+          symbol: p.asset || p.symbol,
+          valueUsd: p.valueUSD || 0,
+          platform: p.platform,
+          type: p.type,
+        })) || [],
+        pnl: {
+          daily: agentState.currentDailyPnL || 0,
+          total: agentState.totalPnL || 0,
+          dailyPercent: base.totalValue > 0 ? ((agentState.currentDailyPnL || 0) / base.totalValue) * 100 : 0,
+        },
+        goals: kitConfig.trading?.goals || [],
+        lastUpdate: agentState.lastUpdate || new Date().toISOString(),
+      };
+    } catch {
+      return { totalValue: 0, change24h: 0, platforms: {}, byClass: [], topHoldings: [], pnl: { daily: 0, total: 0, dailyPercent: 0 }, goals: [], lastUpdate: new Date().toISOString() };
+    }
+  }
+
+  /**
+   * Portfolio P&L history (simulated daily snapshots)
+   */
+  private getPortfolioHistory(): any[] {
+    try {
+      const fs = require('fs');
+      const agentPath = path.join(this.config.stateDir, 'autonomous_state.json');
+      if (!fs.existsSync(agentPath)) return [];
+      const agentState = JSON.parse(fs.readFileSync(agentPath, 'utf8'));
+      
+      // Use recorded P&L snapshots or generate from decisions
+      const snapshots = agentState.pnlHistory || [];
+      if (snapshots.length > 0) return snapshots;
+      
+      // Fallback: generate from brain decisions
+      const decisionsPath = path.join(this.config.stateDir, 'decisions.json');
+      if (fs.existsSync(decisionsPath)) {
+        const decisions = JSON.parse(fs.readFileSync(decisionsPath, 'utf8'));
+        const executed = decisions.filter((d: any) => d.status === 'executed' && d.executedAt);
+        return executed.map((d: any) => ({
+          date: d.executedAt?.slice(0, 10) || d.createdAt?.slice(0, 10),
+          value: d.action.amount,
+          pnl: d.executionResult?.filledPrice ? d.executionResult.filledPrice - d.action.amount : 0,
+          trade: `${d.action.side.toUpperCase()} ${d.action.asset.symbol}`,
+        }));
+      }
+      return [];
+    } catch { return []; }
+  }
+
+  /**
+   * Trade history (paper trades + executed decisions)
+   */
+  private getTradeHistory(type: string): any[] {
+    try {
+      const fs = require('fs');
+      const results: any[] = [];
+
+      if (type === 'all' || type === 'paper') {
+        const paperPath = path.join(this.config.stateDir, 'paper-trades.json');
+        if (fs.existsSync(paperPath)) {
+          const trades = JSON.parse(fs.readFileSync(paperPath, 'utf8'));
+          results.push(...trades.map((t: any) => ({ ...t, source: 'paper' })));
+        }
+      }
+
+      if (type === 'all' || type === 'brain') {
+        const decisionsPath = path.join(this.config.stateDir, 'decisions.json');
+        if (fs.existsSync(decisionsPath)) {
+          const decisions = JSON.parse(fs.readFileSync(decisionsPath, 'utf8'));
+          results.push(...decisions
+            .filter((d: any) => d.status === 'executed' || d.status === 'failed')
+            .map((d: any) => ({ ...d, source: 'brain' })));
+        }
+      }
+
+      results.sort((a, b) => {
+        const ta = new Date(a.executedAt || a.createdAt || a.timestamp || 0).getTime();
+        const tb = new Date(b.executedAt || b.createdAt || b.timestamp || 0).getTime();
+        return tb - ta;
+      });
+
+      return results;
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Get OHLCV chart data via CCXT
+   */
+  private async getChartData(symbol: string, timeframe: string, limit: number): Promise<any[]> {
+    let ccxt: any;
+    try { ccxt = require('ccxt'); } catch { throw new Error('ccxt not installed'); }
+
+    const isCrypto = symbol.includes('/') && (symbol.includes('USDT') || symbol.includes('BTC') || symbol.includes('ETH'));
+    const isForex = !isCrypto && symbol.length === 6;
+
+    const tfMap: Record<string, string> = {
+      '1m': '1m', '5m': '5m', '15m': '15m', '1h': '1h', '4h': '4h', '1d': '1d',
+    };
+    const ccxtTf = tfMap[timeframe] || '1h';
+
+    if (isCrypto) {
+      const exchange = new ccxt.binance({ enableRateLimit: true });
+      const ohlcv = await exchange.fetchOHLCV(symbol, ccxtTf, undefined, limit);
+      return ohlcv.map((c: any[]) => ({
+        timestamp: c[0],
+        open: c[1],
+        high: c[2],
+        low: c[3],
+        close: c[4],
+        volume: c[5],
+      }));
+    } else if (isForex) {
+      // Forex: simulate from the base currency using stablecoins as proxy
+      const base = symbol.slice(0, 3);
+      const quote = symbol.slice(3, 6);
+      const cryptoSymbol = `${base}/USDT`;
+      try {
+        const exchange = new ccxt.binance({ enableRateLimit: true });
+        const ohlcv = await exchange.fetchOHLCV(cryptoSymbol, ccxtTf, undefined, limit);
+        return ohlcv.map((c: any[]) => ({
+          timestamp: c[0],
+          open: c[1],
+          high: c[2],
+          low: c[3],
+          close: c[4],
+          volume: c[5],
+        }));
+      } catch {
+        // Fallback: generate synthetic data
+        const now = Date.now();
+        const tfMs: Record<string, number> = { '1m': 60000, '5m': 300000, '15m': 900000, '1h': 3600000, '4h': 14400000, '1d': 86400000 };
+        const interval = tfMs[ccxtTf] || 3600000;
+        let price = 1.1 + Math.random() * 0.2;
+        return Array.from({ length: limit }, (_, i) => {
+          const delta = (Math.random() - 0.48) * 0.005;
+          const open = price;
+          price += delta;
+          return {
+            timestamp: now - (limit - i) * interval,
+            open: +open.toFixed(5),
+            high: +(Math.max(open, price) + Math.random() * 0.002).toFixed(5),
+            low: +(Math.min(open, price) - Math.random() * 0.002).toFixed(5),
+            close: +price.toFixed(5),
+            volume: Math.floor(Math.random() * 100000),
+          };
+        });
+      }
+    }
+
+    throw new Error(`Unsupported symbol: ${symbol}`);
+  }
+
+  /**
+   * Push an alert to the ring buffer and broadcast to WS clients
+   */
+  pushAlert(kind: GatewayAlert['kind'], title: string, message: string, severity: GatewayAlert['severity'] = 'info', data?: any): void {
+    const alertData = {
+      id: `${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
+      kind,
+      title,
+      message,
+      severity,
+      timestamp: new Date().toISOString(),
+      data,
+    };
+    this.state.alerts.push(alertData);
+    // Keep last 200 in memory
+    if (this.state.alerts.length > 200) {
+      this.state.alerts = this.state.alerts.slice(-200);
+    }
+    // Persist to database
+    try {
+      insertAlert({
+        kind,
+        title,
+        message,
+        severity,
+        data: data ? JSON.stringify(data) : undefined,
+        created_at: alertData.timestamp,
+      });
+    } catch (e) {
+      // DB not ready yet
+    }
+    // Broadcast to all WS clients
+    const frame = JSON.stringify({ type: 'alert', alert: alertData });
+    for (const client of this.state.clients.values()) {
+      if (client.ws.readyState === WebSocket.OPEN) {
+        client.ws.send(frame);
+      }
+    }
+  }
+
+  /**
+   * Try to serve a file from the React dashboard build directory
+   */
+  private serveReactApp(req: IncomingMessage, res: ServerResponse, urlPath: string): boolean {
+    const candidates = [
+      this.config.dashboardDir,
+      path.join(__dirname, '..', 'dashboard', 'dist'),
+      path.join(process.cwd(), 'src', 'dashboard', 'dist'),
+      path.join(__dirname, '..', '..', '..', 'src', 'dashboard', 'dist'),
+    ].filter(Boolean) as string[];
+
+    let dashboardDir: string | undefined;
+    try {
+      const fs = require('fs');
+      for (const dir of candidates) {
+        if (dir && fs.existsSync(dir)) { dashboardDir = dir; break; }
+      }
+      if (!dashboardDir) return false;
+
+      // For SPA: serve index.html for any non-file path
+      let filePath = path.join(dashboardDir, urlPath === '/' ? 'index.html' : urlPath);
+      if (!fs.existsSync(filePath)) {
+        filePath = path.join(dashboardDir, 'index.html');
+      }
+
+      const ext = path.extname(filePath);
+      const mime: Record<string, string> = {
+        '.html': 'text/html',
+        '.css': 'text/css',
+        '.js': 'application/javascript',
+        '.json': 'application/json',
+        '.png': 'image/png',
+        '.jpg': 'image/jpeg',
+        '.svg': 'image/svg+xml',
+        '.ico': 'image/x-icon',
+        '.woff2': 'font/woff2',
+      };
+
+      const content = fs.readFileSync(filePath);
+      res.writeHead(200, {
+        'Content-Type': mime[ext] || 'application/octet-stream',
+        'Cache-Control': ext === '.html' ? 'no-cache' : 'max-age=31536000',
+      });
+      res.end(content);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
    * Get inline dashboard HTML
    */
   private getInlineDashboard(): string {
@@ -2011,6 +2543,9 @@ export function createGatewayServer(config?: Partial<GatewayConfig>): GatewaySer
 // ============================================================================
 
 if (require.main === module) {
+  // Load .env file into process.env
+  try { require('dotenv').config(); } catch {}
+
   const gateway = createGatewayServer();
   
   gateway.start().catch(err => {

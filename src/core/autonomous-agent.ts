@@ -17,8 +17,11 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
+import * as crypto from 'crypto';
 import { EventEmitter } from 'events';
 import { getPythonPath } from '../tools/skill-bridge';
+import { ExchangeManager, SupportedExchange } from '../exchanges/exchange-manager';
+import { initDatabase, insertTrade } from '../persistence';
 
 const KIT_HOME = path.join(os.homedir(), '.kit');
 const AGENT_STATE_PATH = path.join(KIT_HOME, 'autonomous_state.json');
@@ -110,6 +113,7 @@ export interface MarketOpportunity {
 export interface AutonomousState {
   // Core settings
   enabled: boolean;
+  paperTrading: boolean;
   lastHeartbeat: string;
   heartbeatIntervalMs: number;
   
@@ -174,6 +178,7 @@ export interface AutonomousState {
 function getDefaultState(): AutonomousState {
   return {
     enabled: false,
+    paperTrading: true,
     lastHeartbeat: '',
     heartbeatIntervalMs: 60000, // 1 minute
     
@@ -192,7 +197,7 @@ function getDefaultState(): AutonomousState {
     lastRebalanceCheck: '',
     
     priceAlerts: [],
-    watchlist: ['BTCUSDT', 'ETHUSDT', 'XAUUSD', 'EURUSD', 'SOLUSDT'],
+    watchlist: ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'BNB/USDT'],
     monitoredSymbols: new Map(),
     
     passivePositions: [],
@@ -323,8 +328,64 @@ async function getPrice(symbol: string): Promise<number | null> {
 // ============================================================================
 
 async function getBinanceBalance(apiKey: string, apiSecret: string): Promise<{ total: number; assets: Record<string, number> }> {
-  // TODO: Implement real Binance balance fetch with HMAC signature
-  return { total: 0, assets: {} };
+  try {
+    const timestamp = Date.now();
+    const queryString = `timestamp=${timestamp}`;
+    const signature = crypto
+      .createHmac('sha256', apiSecret)
+      .update(queryString)
+      .digest('hex');
+
+    const res = await fetch(
+      `https://api.binance.com/api/v3/account?${queryString}&signature=${signature}`,
+      {
+        headers: { 'X-MBX-APIKEY': apiKey },
+      }
+    );
+
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      console.error('Binance balance fetch failed:', err.msg || res.statusText);
+      return { total: 0, assets: {} };
+    }
+
+    const data = await res.json();
+    const assets: Record<string, number> = {};
+    let total = 0;
+
+    for (const bal of data.balances || []) {
+      const free = parseFloat(bal.free);
+      const locked = parseFloat(bal.locked);
+      const amount = free + locked;
+      if (amount > 0) {
+        assets[bal.asset] = amount;
+      }
+    }
+
+    // Estimate total USD value using Binance ticker prices
+    for (const [asset, amount] of Object.entries(assets)) {
+      if (asset === 'USDT' || asset === 'BUSD' || asset === 'USDC' || asset === 'FDUSD') {
+        total += amount;
+      } else {
+        try {
+          const priceRes = await fetch(
+            `https://api.binance.com/api/v3/ticker/price?symbol=${asset}USDT`
+          );
+          if (priceRes.ok) {
+            const priceData = await priceRes.json();
+            total += amount * parseFloat(priceData.price);
+          }
+        } catch {
+          // Skip assets without USDT pair
+        }
+      }
+    }
+
+    return { total, assets };
+  } catch (error) {
+    console.error('Binance balance error:', error);
+    return { total: 0, assets: {} };
+  }
 }
 
 async function getMT5Balance(): Promise<{ balance: number; equity: number; profit: number }> {
@@ -402,6 +463,7 @@ export class AutonomousAgent extends EventEmitter {
     
     return `🤖 **K.I.T. Autonomous Agent ACTIVATED**
 
+✅ Mode: ${this.state.paperTrading ? '📝 PAPER TRADING (no real trades)' : '💰 LIVE TRADING'}
 ✅ Heartbeat: Every ${this.state.heartbeatIntervalMs / 1000}s
 ✅ Platforms: ${this.state.platforms.length} connected
 ✅ Watchlist: ${this.state.watchlist.length} symbols
@@ -823,13 +885,249 @@ _K.I.T. - Your Wealth is My Mission_ 🤖`;
     if (this.state.tradesToday >= this.state.maxDailyTrades) {
       return '⛔ Daily trade limit reached';
     }
-    
-    // TODO: Route to correct platform and execute
+
+    // Paper trading mode — log instead of executing
+    if (this.state.paperTrading) {
+      const now = new Date().toISOString();
+      const logEntry = {
+        timestamp: now,
+        action,
+        mode: 'paper',
+      };
+      const logPath = path.join(KIT_HOME, 'paper-trades.json');
+      let logs: any[] = [];
+      try {
+        logs = JSON.parse(fs.readFileSync(logPath, 'utf8'));
+      } catch {}
+      logs.push(logEntry);
+      fs.writeFileSync(logPath, JSON.stringify(logs, null, 2));
+
+      // Log to database
+      try {
+        initDatabase();
+        insertTrade({
+          ticket: Date.now(),
+          symbol: action.symbol,
+          type: action.type,
+          volume: action.amount || 0.01,
+          status: 'open',
+          exchange: action.platform,
+          strategy: 'autonomous-agent',
+          opened_at: now,
+          notes: 'paper trade',
+        });
+      } catch {}
+
+      this.state.tradesToday++;
+      this.state.totalTradesExecuted++;
+      saveState(this.state);
+
+      return `📝 [PAPER] ${action.type.toUpperCase()} ${action.amount || 'default'} ${action.symbol} on ${action.platform} (not executed)`;
+    }
+
+    // Find the platform connection
+    const platform = this.state.platforms.find(
+      p => p.platform === action.platform && p.enabled
+    );
+
+    if (!platform) {
+      return `⛔ Platform "${action.platform}" not connected or not enabled`;
+    }
+
+    let result: string;
+
+    try {
+      if (action.platform === 'mt5') {
+        result = await this.executeMT5Trade(action);
+      } else if (['binance', 'bybit', 'kraken', 'coinbase'].includes(action.platform)) {
+        result = await this.executeCCXTTrade(action, platform);
+      } else if (action.platform === 'binaryfaster') {
+        result = await this.executeBinaryFasterTrade(action, platform);
+      } else {
+        return `⛔ Unsupported platform: ${action.platform}`;
+      }
+    } catch (error: any) {
+      this.emit('trade_error', { action, error: error.message });
+      return `❌ Trade failed: ${error.message}`;
+    }
+
     this.state.tradesToday++;
     this.state.totalTradesExecuted++;
     saveState(this.state);
-    
-    return `✅ Trade executed: ${action.type} ${action.symbol} on ${action.platform}`;
+
+    // Log to database
+    try {
+      const now = new Date().toISOString();
+      insertTrade({
+        ticket: Date.now(),
+        symbol: action.symbol,
+        type: action.type,
+        volume: action.amount || 0.01,
+        status: 'open',
+        exchange: action.platform,
+        strategy: 'autonomous-agent',
+        opened_at: now,
+        notes: result,
+      });
+    } catch {}
+
+    this.emit('trade_executed', { action, result, timestamp: new Date().toISOString() });
+    return result;
+  }
+
+  private async executeMT5Trade(action: TradeAction): Promise<string> {
+    const { execSync } = require('child_process');
+    const pythonPath = getPythonPath();
+    const volume = action.amount || 0.01;
+
+    // Build MT5 order command
+    const slParam = (action as any).stopLoss || 0;
+    const tpParam = (action as any).takeProfit || 0;
+
+    if (action.type === 'close') {
+      // Close position by ticket
+      const ticket = (action as any).ticket;
+      if (!ticket) return '⛔ MT5 close requires a ticket number';
+      const cmd = `close ${ticket}`;
+      const scriptPath = this.findMT5Script();
+      const result = execSync(`${pythonPath} "${scriptPath}" ${cmd}`, {
+        encoding: 'utf-8',
+        timeout: 30000,
+        windowsHide: true,
+      });
+      const parsed = JSON.parse(result.trim());
+      if (parsed.success) {
+        return `✅ MT5: Closed position #${ticket}`;
+      }
+      return `❌ MT5 close failed: ${parsed.error || 'Unknown error'}`;
+    }
+
+    // Market order: buy/sell SYMBOL VOLUME SL TP
+    const orderType = action.type === 'buy' || action.type === 'sell' ? action.type : 'buy';
+    const cmd = `${orderType} ${action.symbol} ${volume} ${slParam} ${tpParam}`;
+    const scriptPath = this.findMT5Script();
+    const result = execSync(`${pythonPath} "${scriptPath}" ${cmd}`, {
+      encoding: 'utf-8',
+      timeout: 30000,
+      windowsHide: true,
+    });
+    const parsed = JSON.parse(result.trim());
+
+    if (parsed.success) {
+      const orderId = parsed.order?.ticket || parsed.ticket || 'unknown';
+      return `✅ MT5: ${orderType.toUpperCase()} ${volume} lots ${action.symbol} | Order #${orderId}`;
+    }
+    return `❌ MT5 order failed: ${parsed.error || 'Unknown error'}`;
+  }
+
+  private async executeCCXTTrade(action: TradeAction, platform: PlatformConnection): Promise<string> {
+    const exchangeId = platform.platform as SupportedExchange;
+    const manager = new ExchangeManager(true);
+
+    const connected = await manager.addExchange({
+      exchange: exchangeId,
+      credentials: {
+        apiKey: platform.credentials.apiKey || '',
+        secret: platform.credentials.apiSecret || '',
+        password: platform.credentials.password,
+        testnet: platform.credentials.testnet === 'true',
+      },
+      sandbox: platform.credentials.testnet === 'true',
+    });
+
+    if (!connected) {
+      return `❌ Failed to connect to ${exchangeId}`;
+    }
+
+    // Convert symbol format: EURUSD -> EUR/USDT for crypto, or keep as-is
+    const ccxtSymbol = this.toCCXTSymbol(action.symbol, exchangeId);
+
+    if (action.type === 'close') {
+      // Close = sell everything we have
+      const balances = await manager.getBalance(exchangeId);
+      const base = ccxtSymbol.split('/')[0];
+      const holding = balances.find(b => b.asset === base);
+      if (!holding || holding.free <= 0) {
+        return `⛔ No ${base} balance to close on ${exchangeId}`;
+      }
+      const result = await manager.marketOrder(exchangeId, ccxtSymbol, 'sell', holding.free);
+      if (result.success) {
+        return `✅ ${exchangeId}: Closed ${holding.free} ${base} | Order #${result.order?.id}`;
+      }
+      return `❌ ${exchangeId} close failed: ${result.error}`;
+    }
+
+    // Market order
+    const result = await manager.marketOrder(exchangeId, ccxtSymbol, action.type as 'buy' | 'sell', action.amount || 0);
+
+    if (result.success) {
+      return `✅ ${exchangeId}: ${action.type.toUpperCase()} ${action.amount} ${ccxtSymbol} | Order #${result.order?.id} | Filled: ${result.order?.filled}`;
+    }
+    return `❌ ${exchangeId} trade failed: ${result.error}`;
+  }
+
+  private async executeBinaryFasterTrade(action: TradeAction, platform: PlatformConnection): Promise<string> {
+    try {
+      const loginRes = await fetch('https://wsauto.binaryfaster.com/automation/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          email: platform.credentials.email,
+          password: platform.credentials.password,
+        }),
+      });
+      const loginData = await loginRes.json();
+      const apiKey = loginData.api_key;
+
+      if (!apiKey) return '❌ BinaryFaster login failed';
+
+      const tradeRes = await fetch('https://wsauto.binaryfaster.com/automation/traderoom/trade', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': apiKey,
+        },
+        body: JSON.stringify({
+          symbol: action.symbol,
+          direction: action.type,
+          amount: action.amount || 1,
+        }),
+      });
+      const tradeData = await tradeRes.json();
+
+      if (tradeData.success || tradeData.id) {
+        return `✅ BinaryFaster: ${action.type.toUpperCase()} ${action.symbol} | Trade #${tradeData.id || 'placed'}`;
+      }
+      return `❌ BinaryFaster trade failed: ${tradeData.error || JSON.stringify(tradeData)}`;
+    } catch (error: any) {
+      return `❌ BinaryFaster error: ${error.message}`;
+    }
+  }
+
+  private findMT5Script(): string {
+    const possiblePaths = [
+      path.join(__dirname, '../../../skills/metatrader/scripts/auto_connect.py'),
+      path.join(__dirname, '../../skills/metatrader/scripts/auto_connect.py'),
+      path.join(process.cwd(), 'skills/metatrader/scripts/auto_connect.py'),
+    ];
+    return possiblePaths.find(p => fs.existsSync(p)) || possiblePaths[0];
+  }
+
+  private toCCXTSymbol(symbol: string, exchange: string): string {
+    // If already has slash, return as-is
+    if (symbol.includes('/')) return symbol;
+
+    // Common forex pairs (6 chars, no USD inside) - these aren't on most crypto exchanges
+    // For crypto symbols like BTCUSDT -> BTC/USDT
+    const usdtPairs = ['USDT', 'BUSD', 'USDC', 'FDUSD', 'BTC', 'ETH'];
+    for (const quote of usdtPairs) {
+      if (symbol.endsWith(quote) && symbol.length > quote.length) {
+        return `${symbol.slice(0, -quote.length)}/${quote}`;
+      }
+    }
+
+    // Fallback: try inserting slash before last 4-6 chars
+    return symbol;
   }
 
   // ========== PLATFORM SYNC ==========

@@ -13,6 +13,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { execSync } from 'child_process';
 import { ToolDefinition as ChatToolDef } from '../gateway/chat-manager';
+import { getPythonPath } from './skill-bridge';
 
 // ============================================================================
 // Strategy Tool Definitions
@@ -262,7 +263,8 @@ function execMT5(command: string): any {
   }
   
   try {
-    const result = execSync(`python "${scriptPath}" ${command}`, {
+    const pythonCmd = getPythonPath();
+    const result = execSync(`"${pythonCmd}" "${scriptPath}" ${command}`, {
       encoding: 'utf-8',
       timeout: 30000,
       windowsHide: true,

@@ -1172,7 +1172,8 @@ result = mt5.order_send(request)
 print(result)
 `;
     
-    const result = execSync(`python -c "${script.replace(/"/g, '\\"')}"`, { encoding: 'utf8' });
+    const pythonCmd = getPythonPath();
+    const result = execSync(`"${pythonCmd}" -c "${script.replace(/"/g, '\\"')}"`, { encoding: 'utf8' });
     
     return `✅ **MT5 Trade executed**
 

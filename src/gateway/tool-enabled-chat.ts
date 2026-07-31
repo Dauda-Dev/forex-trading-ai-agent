@@ -454,8 +454,20 @@ export class ToolEnabledChatHandler {
       console.log('   ⚠️ Workspace loader not available:', e);
     }
     
+    // Read model from config
+    let defaultModel = 'gpt-4o-mini';
+    try {
+      const fs2 = require('fs');
+      const os2 = require('os');
+      const configPath = require('path').join(os2.homedir(), '.kit', 'config.json');
+      if (fs2.existsSync(configPath)) {
+        const cfg = JSON.parse(fs2.readFileSync(configPath, 'utf8'));
+        if (cfg.ai?.model) defaultModel = cfg.ai.model;
+      }
+    } catch {}
+
     this.config = {
-      model: config?.model || 'gpt-4o-mini',
+      model: config?.model || defaultModel,
       systemPrompt: (config?.systemPrompt || DEFAULT_SYSTEM_PROMPT) + workspaceContext,
       maxTokens: config?.maxTokens || 4096,
       temperature: config?.temperature || 0.7,
@@ -1325,6 +1337,14 @@ Your personal AI financial agent is ready.
 
     // Use configured provider first - with robust error handling
     try {
+      if (configuredProvider === 'groq' && process.env.GROQ_API_KEY) {
+        return await this.callGroq(messages, sendChunk, sendToolCall, sendToolResult);
+      }
+
+      if (configuredProvider === 'google' && process.env.GOOGLE_API_KEY) {
+        return await this.callGoogle(messages, sendChunk, sendToolCall, sendToolResult);
+      }
+
       if (configuredProvider === 'openai' && process.env.OPENAI_API_KEY) {
         return await this.callOpenAI(messages, sendChunk, sendToolCall, sendToolResult);
       }
@@ -1334,6 +1354,14 @@ Your personal AI financial agent is ready.
       }
 
       // Fallback: check any available API key
+      if (process.env.GROQ_API_KEY) {
+        return await this.callGroq(messages, sendChunk, sendToolCall, sendToolResult);
+      }
+
+      if (process.env.GOOGLE_API_KEY) {
+        return await this.callGoogle(messages, sendChunk, sendToolCall, sendToolResult);
+      }
+
       if (process.env.OPENAI_API_KEY) {
         return await this.callOpenAI(messages, sendChunk, sendToolCall, sendToolResult);
       }
@@ -1342,7 +1370,7 @@ Your personal AI financial agent is ready.
         return await this.callAnthropic(messages, sendChunk, sendToolCall, sendToolResult);
       }
 
-      return 'No AI API key configured. Please set OPENAI_API_KEY or ANTHROPIC_API_KEY.';
+      return 'No AI API key configured. Please set GROQ_API_KEY, GOOGLE_API_KEY, OPENAI_API_KEY, or ANTHROPIC_API_KEY.';
     } catch (llmError: any) {
       console.error('[LLM] Provider call failed:', llmError?.message || llmError);
       // Return error message instead of throwing - this prevents crashes
@@ -1491,6 +1519,356 @@ Your personal AI financial agent is ready.
         return `🌐 Network error - please try again in a moment.`;
       }
       return `I encountered an error: ${errorMsg}. Please try again.`;
+    }
+  }
+
+  /**
+   * Call Groq API (OpenAI-compatible) with tools
+   * All errors are caught and returned as messages - never throws
+   */
+  private async callGroq(
+    messages: ChatMessage[],
+    sendChunk: (chunk: string) => void,
+    sendToolCall: (name: string, args: any) => void,
+    sendToolResult: (name: string, result: any) => void
+  ): Promise<string> {
+    try {
+      const apiKey = process.env.GROQ_API_KEY;
+      const model = this.config.model || 'llama-3.3-70b-versatile';
+      const allTools = this.getToolDefinitions();
+      const GROQ_TOOL_LIMIT = 8;
+
+      const corePrefixes = ['mt5_', 'trading_', 'memory_', 'read', 'write'];
+      const coreTools = allTools.filter((t: any) =>
+        corePrefixes.some(prefix => t.function.name.startsWith(prefix))
+      );
+      const otherTools = allTools.filter((t: any) =>
+        !corePrefixes.some(prefix => t.function.name.startsWith(prefix))
+      );
+
+      const tools = [
+        ...coreTools,
+        ...otherTools.slice(0, Math.max(0, GROQ_TOOL_LIMIT - coreTools.length))
+      ].slice(0, GROQ_TOOL_LIMIT).map((t: any) => ({
+        type: 'function',
+        function: {
+          name: t.function.name,
+          description: t.function.description || '',
+          parameters: t.function.parameters,
+        },
+      }));
+
+      const GROQ_SYSTEM = `You are K.I.T., an AI financial trading agent. You monitor markets, analyze opportunities, and execute paper trades. Be concise. Use tools to check prices, analyze indicators, and manage trades.`;
+
+      const groqMessages: any[] = [
+        { role: 'system', content: GROQ_SYSTEM },
+        ...messages.map(m => {
+          if (m.role === 'tool') {
+            return { role: 'tool', tool_call_id: m.toolCallId, content: m.content };
+          }
+          return { role: m.role, content: m.content, tool_calls: m.toolCalls };
+        }),
+      ];
+
+      let fullResponse = '';
+      let maxIterations = 10;
+
+      while (maxIterations > 0) {
+        maxIterations--;
+
+        // Rate limit: wait 6s between requests for Groq free tier
+        await new Promise(r => setTimeout(r, 6000));
+
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 120000);
+
+        let response;
+        try {
+          console.log(`[Groq] Sending request to ${model}...`);
+          response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': `Bearer ${apiKey}`,
+            },
+            body: JSON.stringify({
+              model,
+              messages: groqMessages,
+              tools,
+              max_tokens: this.config.maxTokens,
+            }),
+            signal: controller.signal,
+          });
+          clearTimeout(timeoutId);
+          console.log('[Groq] Response status:', response.status);
+        } catch (fetchError: any) {
+          clearTimeout(timeoutId);
+          if (fetchError.name === 'AbortError') {
+            throw new Error('Groq API request timed out after 2 minutes');
+          }
+          throw new Error(`Groq fetch failed: ${fetchError.message}`);
+        }
+
+        if (!response.ok) {
+          const error = await response.text();
+          console.error('[Groq] API error:', response.status, error);
+          
+          // Retry on rate limit with backoff
+          if (response.status === 429) {
+            const retryMatch = error.match(/try again in ([\d.]+)s/);
+            const waitSec = retryMatch ? parseFloat(retryMatch[1]) : 15;
+            console.log(`[Groq] Rate limited, waiting ${waitSec}s...`);
+            await new Promise(r => setTimeout(r, waitSec * 1000));
+            continue; // Retry this iteration
+          }
+          
+          throw new Error(`Groq API error: ${error}`);
+        }
+
+        const data = await response.json() as any;
+        const message = data.choices?.[0]?.message;
+
+        if (!message) {
+          throw new Error('Groq returned no message');
+        }
+
+        if (message.content) {
+          fullResponse += message.content;
+          sendChunk(message.content);
+        }
+
+        if (message.tool_calls && message.tool_calls.length > 0) {
+          groqMessages.push(message);
+
+          for (const toolCall of message.tool_calls) {
+            const name = toolCall.function.name;
+            let args;
+            try {
+              args = JSON.parse(toolCall.function.arguments);
+            } catch {
+              args = {};
+            }
+
+            sendToolCall(name, args);
+
+            try {
+              const result = await this.toolRegistry.execute(name, args);
+              sendToolResult(name, result);
+
+              groqMessages.push({
+                role: 'tool',
+                tool_call_id: toolCall.id,
+                content: JSON.stringify(result),
+              });
+            } catch (error) {
+              const errorResult = { error: error instanceof Error ? error.message : 'Tool execution failed' };
+              sendToolResult(name, errorResult);
+
+              groqMessages.push({
+                role: 'tool',
+                tool_call_id: toolCall.id,
+                content: JSON.stringify(errorResult),
+              });
+            }
+          }
+        } else {
+          break;
+        }
+      }
+
+      return fullResponse || '(No response from Groq)';
+    } catch (error: any) {
+      console.error('[Groq] Error:', error);
+      const errorMsg = error?.message || String(error);
+      if (errorMsg.includes('API key')) {
+        return 'Invalid Groq API key. Check your GROQ_API_KEY.';
+      }
+      if (errorMsg.includes('fetch failed') || errorMsg.includes('network')) {
+        return 'Network error connecting to Groq API.';
+      }
+      return `Groq error: ${errorMsg}`;
+    }
+  }
+
+  /**
+   * Call Google Gemini API with tools
+   * All errors are caught and returned as messages - never throws
+   */
+  private async callGoogle(
+    messages: ChatMessage[],
+    sendChunk: (chunk: string) => void,
+    sendToolCall: (name: string, args: any) => void,
+    sendToolResult: (name: string, result: any) => void
+  ): Promise<string> {
+    try {
+      const apiKey = process.env.GOOGLE_API_KEY;
+      const model = this.config.model || 'gemini-flash-latest';
+      const allTools = this.getToolDefinitions();
+      const GEMINI_TOOL_LIMIT = 128;
+
+      const priorityPrefixes = ['binary_', 'mt5_', 'trading_', 'memory_', 'read', 'write', 'exec', 'status', 'config_', 'telegram_', 'whatsapp_', 'onboarding_'];
+      const priorityTools = allTools.filter((t: any) =>
+        priorityPrefixes.some(prefix => t.function.name.startsWith(prefix))
+      );
+      const otherTools = allTools.filter((t: any) =>
+        !priorityPrefixes.some(prefix => t.function.name.startsWith(prefix))
+      );
+
+      const selectedTools = [
+        ...priorityTools,
+        ...otherTools.slice(0, Math.max(0, GEMINI_TOOL_LIMIT - priorityTools.length))
+      ].slice(0, GEMINI_TOOL_LIMIT);
+
+      // Convert tools to Gemini function declarations
+      // Sanitize schemas: Gemini requires `type` on all properties, especially arrays
+      const sanitizeSchema = (schema: any): any => {
+        if (!schema || typeof schema !== 'object') return schema;
+        const out: any = Array.isArray(schema) ? [] : {};
+        for (const [k, v] of Object.entries(schema)) {
+          if (typeof v === 'object' && v !== null) {
+            out[k] = sanitizeSchema(v);
+          } else {
+            out[k] = v;
+          }
+        }
+        // If has 'items' but type is not 'array', fix it
+        if (out.items && out.type !== 'array') out.type = 'array';
+        return out;
+      };
+
+      const functionDeclarations = selectedTools.map((t: any) => ({
+        name: t.function.name,
+        description: t.function.description || '',
+        parameters: sanitizeSchema(t.function.parameters),
+      }));
+
+      // Format messages for Gemini
+      const geminiContents: any[] = [];
+      let systemInstruction = this.config.systemPrompt;
+
+      for (const m of messages) {
+        if (m.role === 'system') {
+          systemInstruction = m.content;
+        } else if (m.role === 'tool') {
+          // Append tool result as a function response
+          geminiContents.push({
+            role: 'user',
+            parts: [{ text: `Tool result for ${m.toolCallId}: ${m.content}` }],
+          });
+        } else {
+          geminiContents.push({
+            role: m.role === 'assistant' ? 'model' : 'user',
+            parts: [{ text: m.content }],
+          });
+        }
+      }
+
+      let fullResponse = '';
+      let maxIterations = 10;
+
+      while (maxIterations > 0) {
+        maxIterations--;
+
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 180000);
+
+        let response;
+        try {
+          console.log(`[Gemini] Sending request to ${model}...`);
+          response = await fetch(
+            `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
+            {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                system_instruction: { parts: [{ text: systemInstruction }] },
+                contents: geminiContents,
+                tools: functionDeclarations.length > 0 ? [{ function_declarations: functionDeclarations }] : undefined,
+              }),
+              signal: controller.signal,
+            }
+          );
+          clearTimeout(timeoutId);
+          console.log('[Gemini] Response status:', response.status);
+        } catch (fetchError: any) {
+          clearTimeout(timeoutId);
+          if (fetchError.name === 'AbortError') {
+            throw new Error('Gemini API request timed out after 3 minutes');
+          }
+          throw new Error(`Gemini fetch failed: ${fetchError.message}`);
+        }
+
+        if (!response.ok) {
+          const error = await response.text();
+          console.error('[Gemini] API error:', error);
+          throw new Error(`Gemini API error: ${error}`);
+        }
+
+        const data = await response.json() as any;
+        const candidate = data.candidates?.[0];
+        if (!candidate?.content?.parts) {
+          throw new Error('Gemini returned no content');
+        }
+
+        let hasFunctionCall = false;
+        const functionCalls = candidate.content.parts.filter((p: any) => p.functionCall);
+        const textParts = candidate.content.parts.filter((p: any) => p.text);
+
+        // Extract text
+        for (const part of textParts) {
+          fullResponse += part.text;
+          sendChunk(part.text);
+        }
+
+        if (functionCalls.length > 0) {
+          hasFunctionCall = true;
+
+          // Push the ENTIRE original model message (preserves thought_signatures)
+          geminiContents.push({
+            role: 'model',
+            parts: candidate.content.parts,
+          });
+
+          // Execute all function calls and collect responses
+          const functionResponses: any[] = [];
+          for (const part of functionCalls) {
+            const { name, args } = part.functionCall;
+            sendToolCall(name, args);
+
+            try {
+              const result = await this.toolRegistry.execute(name, args);
+              sendToolResult(name, result);
+              functionResponses.push({ functionResponse: { name, response: result } });
+            } catch (error) {
+              const errorResult = { error: error instanceof Error ? error.message : 'Tool execution failed' };
+              sendToolResult(name, errorResult);
+              functionResponses.push({ functionResponse: { name, response: errorResult } });
+            }
+          }
+
+          // Push all function responses in a single user message
+          geminiContents.push({
+            role: 'user',
+            parts: functionResponses,
+          });
+        }
+
+        if (!hasFunctionCall) {
+          break;
+        }
+      }
+
+      return fullResponse || '(No response from Gemini)';
+    } catch (error: any) {
+      console.error('[Gemini] Error:', error);
+      const errorMsg = error?.message || String(error);
+      if (errorMsg.includes('API key')) {
+        return '🔑 Invalid Google API key. Check your GOOGLE_API_KEY.';
+      }
+      if (errorMsg.includes('fetch failed') || errorMsg.includes('network')) {
+        return '🌐 Network error connecting to Gemini API.';
+      }
+      return `Gemini error: ${errorMsg}`;
     }
   }
 

@@ -84,7 +84,6 @@ def market_order(symbol: str, order_type: str, volume: float, sl: float = None, 
         "magic": 123456,
         "comment": "K.I.T. Trade",
         "type_time": mt5.ORDER_TIME_GTC,
-        "type_filling": mt5.ORDER_FILLING_IOC,
     }
     
     if sl:
@@ -127,7 +126,6 @@ def close_position(ticket: int):
         "magic": 123456,
         "comment": "K.I.T. Close",
         "type_time": mt5.ORDER_TIME_GTC,
-        "type_filling": mt5.ORDER_FILLING_IOC,
     }
     
     result = mt5.order_send(request)
